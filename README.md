@@ -4,7 +4,7 @@ Sort a messy folder into Documents, Images, Archives, Installers, Audio, Video a
 safely: dry run by default, an undo log for every move, and one command to put it all back.
 
 Built with Claude Code on Ubuntu for the AgentCraft Studio video
-*I Built an AI Agent to Organize My Messy Files*. Python 3 standard library only.
+*AI Agent Organizes 500 Messy Files on Linux (Claude Code)*. Python 3 standard library only.
 
 ## Try it on fake files first
 
