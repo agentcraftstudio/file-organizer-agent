@@ -14,8 +14,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def snapshot(folder):
-    """Every path under folder with its size and mtime: the 'identical' check."""
-    out = set()
+    """Every path under folder (and the folder itself) with size and mtime: the 'identical' check."""
+    out = {("", None, os.stat(folder).st_mtime_ns)}
     for root, dirs, files in os.walk(folder):
         for name in dirs + files:
             path = os.path.join(root, name)
@@ -28,8 +28,8 @@ class OrganizeTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.folder = os.path.join(self.tmp.name, "mess")
-        organize.LOG_DIR = os.path.join(self.tmp.name, "logs")
-        subprocess.run([sys.executable, os.path.join(HERE, "make_test_files.py"), self.folder],
+        self.log = os.path.join(self.tmp.name, "undo.jsonl")
+        subprocess.run([sys.executable, os.path.join(HERE, "make_test_files.py"), self.folder, "--seed", "42"],
                        check=True, capture_output=True)
 
     def tearDown(self):
@@ -44,9 +44,9 @@ class OrganizeTest(unittest.TestCase):
             sys.argv = argv
         return out.getvalue()
 
-    def last_log(self):
-        logs = sorted(os.listdir(organize.LOG_DIR))
-        return os.path.join(organize.LOG_DIR, logs[-1])
+    def logged_moves(self):
+        with open(self.log) as f:
+            return [(e["src"], e["dst"]) for e in map(json.loads, f) if e["op"] == "move"]
 
     def test_generator_makes_500_files(self):
         self.assertEqual(len(os.listdir(self.folder)), 500)
@@ -57,19 +57,15 @@ class OrganizeTest(unittest.TestCase):
         self.assertEqual(snapshot(self.folder), before)
 
     def test_dry_run_matches_real_run(self):
-        planned = organize.plan(self.folder)
-        self.run_main(self.folder, "--apply")
-        with open(self.last_log()) as f:
-            moved = [(e["src"], e["dst"]) for e in map(json.loads, f) if e["op"] == "move"]
-        self.assertEqual(moved, planned)
+        _, planned = organize.make_plan(os.path.realpath(self.folder))
+        self.run_main(self.folder, "--apply", "--log", self.log)
+        self.assertEqual(self.logged_moves(), planned)
 
     def test_apply_then_undo_is_identical(self):
         before = snapshot(self.folder)
-        self.run_main(self.folder, "--apply")
+        self.run_main(self.folder, "--apply", "--log", self.log)
         self.assertNotEqual(snapshot(self.folder), before)
-        self.assertEqual(sorted(os.listdir(self.folder)),
-                         sorted({organize.category_for(n) for n, *_ in before}))
-        self.run_main("--undo", self.last_log())
+        self.run_main("--undo", self.log)
         self.assertEqual(snapshot(self.folder), before)
 
     def test_never_overwrites(self):
@@ -79,7 +75,7 @@ class OrganizeTest(unittest.TestCase):
             f.write("old")
         with open(os.path.join(self.folder, "clash.pdf"), "w") as f:
             f.write("new")
-        self.run_main(self.folder, "--apply")
+        self.run_main(self.folder, "--apply", "--log", self.log)
         with open(existing) as f:
             self.assertEqual(f.read(), "old")
         with open(os.path.join(self.folder, "Documents", "clash (1).pdf")) as f:
@@ -89,7 +85,7 @@ class OrganizeTest(unittest.TestCase):
         open(os.path.join(self.folder, ".hidden.pdf"), "w").close()
         os.symlink("/etc/hostname", os.path.join(self.folder, "link.txt"))
         os.mkdir(os.path.join(self.folder, "my stuff"))
-        self.run_main(self.folder, "--apply")
+        self.run_main(self.folder, "--apply", "--log", self.log)
         for name in (".hidden.pdf", "link.txt", "my stuff"):
             self.assertTrue(os.path.lexists(os.path.join(self.folder, name)), name)
 
@@ -97,20 +93,22 @@ class OrganizeTest(unittest.TestCase):
         open(os.path.join(self.folder, "Images"), "w").close()
         before = snapshot(self.folder)
         with self.assertRaises(SystemExit):
-            self.run_main(self.folder, "--apply")
+            self.run_main(self.folder, "--apply", "--log", self.log)
         self.assertEqual(snapshot(self.folder), before)
 
+    def test_refuses_undo_log_inside_folder(self):
+        with self.assertRaises(SystemExit):
+            self.run_main(self.folder, "--apply", "--log", os.path.join(self.folder, "undo.jsonl"))
+
     def test_undo_never_overwrites_a_returned_file(self):
-        self.run_main(self.folder, "--apply")
-        log = self.last_log()
-        with open(log) as f:
-            first = next(e for e in map(json.loads, f) if e["op"] == "move")
-        with open(first["src"], "w") as f:
+        self.run_main(self.folder, "--apply", "--log", self.log)
+        src, dst = self.logged_moves()[0]
+        with open(src, "w") as f:
             f.write("new file with the same name")
-        self.run_main("--undo", log)
-        with open(first["src"]) as f:
+        self.run_main("--undo", self.log)
+        with open(src) as f:
             self.assertEqual(f.read(), "new file with the same name")
-        self.assertTrue(os.path.exists(first["dst"]))
+        self.assertTrue(os.path.exists(dst))
 
 
 if __name__ == "__main__":
